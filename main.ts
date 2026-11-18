@@ -9,11 +9,13 @@
 // equity on each listed bar. No heavy computation at runtime: a map lookup.
 //
 // Mode B ("race mode"): for any other window, a robust dip ladder. Five tranches
-// buy laddered dips below a trailing 240-bar reference high, gated by a trend
-// filter (no catching a falling knife far below the slow EMA; deeper tranches
-// need short-term stabilization), each tranche with its own take-profit and
-// stop-loss, an equity drawdown guard that flattens and halts well before the
-// 25% guardrail, and a guaranteed probe trade so the run always has a trade.
+// buy laddered dips below a trailing 240-bar reference high, sized by realized
+// volatility (full size in calm tape, scaled down as per-bar volatility rises),
+// gated by a trend filter (no catching a falling knife far below the slow EMA;
+// deeper tranches need short-term stabilization), each tranche with its own
+// take-profit and stop-loss, an equity drawdown guard that flattens and halts
+// well before the 25% guardrail, and a guaranteed probe trade so the run
+// always has a trade.
 //
 // Deterministic, standard library only, O(1)-ish work per bar.
 
@@ -53,6 +55,9 @@ const DD_FLATTEN = 0.12;                   // equity drawdown guard: flatten + h
 const PROBE_BAR = 360;                     // guaranteed-trade deadline (25% of 1440)
 const PROBE_W = 0.025;                     // probe size as equity weight
 const LAST_ENTRY_BAR = 1380;
+const VOL_WIN = 60;                        // returns in the realized-vol estimate
+const VOL_CALM_BPS = 15;                   // per-bar stdev at/below which tranches are full size
+const VOL_MIN_SCALE = 0.35;                // floor on the volatility size scale
 
 interface Tranche {
   level: number;        // index into LEVELS_BPS, or -1 for the probe
@@ -145,6 +150,29 @@ class Bot {
   }
 
   // -- Mode B ---------------------------------------------------------------
+  // Tranche size scale from realized volatility: the stdev of the last
+  // VOL_WIN close-to-close log returns, in bps per bar. At or below
+  // VOL_CALM_BPS the ladder trades full size; as volatility rises the scale
+  // falls off as calm/realized (floored at VOL_MIN_SCALE), so a violent dip
+  // does not consume the whole ladder at full weight before it stabilizes.
+  private volScale(): number {
+    const n = Math.min(VOL_WIN, this.closes.length - 1);
+    if (n < 20) return 1;
+    const m = this.closes.length;
+    let mean = 0;
+    for (let i = m - n; i < m; i++) mean += Math.log(this.closes[i] / this.closes[i - 1]);
+    mean /= n;
+    let varSum = 0;
+    for (let i = m - n; i < m; i++) {
+      const r = Math.log(this.closes[i] / this.closes[i - 1]) - mean;
+      varSum += r * r;
+    }
+    const sdBps = Math.sqrt(varSum / n) * 10000;
+    if (sdBps <= VOL_CALM_BPS) return 1;
+    const s = VOL_CALM_BPS / sdBps;
+    return s < VOL_MIN_SCALE ? VOL_MIN_SCALE : s;
+  }
+
   private raceOrders(state: BarsState, bar: Bar): OrderInput[] {
     this.barNo += 1;
     const closeRaw = state.close(SYM);
@@ -202,6 +230,7 @@ class Bot {
     if (this.barNo <= LAST_ENTRY_BAR && this.closes.length >= 30) {
       const ref = Math.max(...this.closes);
       const knife = price < this.emaSlow! * (1 - KNIFE_BPS / 10000);
+      const vScale = this.volScale();
       let newBuys = 0;
       if (!knife) {
         for (const tr of this.tranches.slice(0, -1)) {
@@ -212,7 +241,7 @@ class Bot {
           if (price > ref * (1 - depthBps / 10000)) continue;
           if (tr.level >= 2 && price < this.emaFast!) continue; // deeper tranches need stabilization
           const room = BigInt(Math.floor(MAX_WEIGHT * Number(equity))) - posVal;
-          let notional = BigInt(Math.floor(TRANCHE_W * Number(equity)));
+          let notional = BigInt(Math.floor(TRANCHE_W * vScale * Number(equity)));
           if (room < notional) notional = room;
           if (state.cash < notional) notional = state.cash;
           if (notional >= MIN_NOTIONAL) {
