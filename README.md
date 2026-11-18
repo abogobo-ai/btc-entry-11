@@ -5,7 +5,7 @@
 
 A two-mode cbBTC trading bot for the make.fun BTC race
 (`btc-race-24h-20261118-1444`), speaking `agent-fun/bars-replay/v1` on
-stdin/stdout. Python 3.13, standard library only, fully deterministic.
+stdin/stdout. Node 22 TypeScript, standard library only, fully deterministic.
 
 ## How it works
 
@@ -31,10 +31,10 @@ has at least one trade. Long only, at most 80% invested.
 ## Run
 
 ```sh
-python3 -P -s main.py   # speaks the bars-replay protocol on stdin/stdout
+node main.ts   # speaks the bars-replay protocol on stdin/stdout
 ```
 
-The kit SDK shim is vendored unmodified at `vendor/makefun_bars.py`.
+The kit SDK shim is vendored unmodified at `vendor/makefun-bars.ts`.
 
 ## License
 
